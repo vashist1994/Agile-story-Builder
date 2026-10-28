@@ -3,9 +3,11 @@ import io
 import logging
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
@@ -22,8 +24,25 @@ settings = get_settings()
 
 app = FastAPI(
     title="Storyforge API",
-    description="Generate grounded agile user stories from plain-language requirements.",
+    description=(
+        "Generate grounded Agile backlogs from plain text or uploaded requirement "
+        "documents, then export a backlog as CSV."
+    ),
     version="1.0.0",
+    openapi_tags=[
+        {
+            "name": "Health",
+            "description": "Check whether the API process is responsive.",
+        },
+        {
+            "name": "Generate backlog",
+            "description": "Generate a validated Agile backlog from typed text or a document.",
+        },
+        {
+            "name": "Export",
+            "description": "Export a generated Agile backlog as a CSV attachment.",
+        },
+    ],
 )
 app.add_middleware(
     CORSMiddleware,
@@ -32,6 +51,25 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    errors = exc.errors()
+    if any(error["type"] == "json_invalid" for error in errors):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    "Invalid JSON request body. Escape line breaks inside the requirement "
+                    "string as \\n, or enter the requirement on one line."
+                )
+            },
+        )
+    return await request_validation_exception_handler(request, exc)
 
 
 class ExportStoryRequest(BaseModel):
@@ -58,21 +96,49 @@ def _format_criteria(criteria: list[dict[str, str]]) -> str:
     )
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["Health"],
+    summary="Check API health",
+    description="Returns API liveness only; it does not call Gemini.",
+)
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/v1/stories/generate", response_model=GeneratedBacklogResponse)
+@app.post(
+    "/api/v1/stories/generate",
+    response_model=GeneratedBacklogResponse,
+    tags=["Generate backlog"],
+    summary="Generate backlog from text",
+    description=(
+        "Submit a requirement as JSON. In Swagger UI, click **Try it out**, edit the "
+        "example request body, then click **Execute**. JSON line breaks inside the "
+        "requirement must be escaped as `\\n`. Requires GOOGLE_API_KEY."
+    ),
+)
 async def create_story(
     payload: GenerateStoryRequest,
 ) -> GeneratedBacklogResponse:
     return await _generate_backlog_response(payload.requirement)
 
 
-@app.post("/api/v1/stories/generate-file", response_model=GeneratedBacklogResponse)
+@app.post(
+    "/api/v1/stories/generate-file",
+    response_model=GeneratedBacklogResponse,
+    tags=["Generate backlog"],
+    summary="Generate backlog from a file",
+    description=(
+        "Upload one UTF-8 TXT, text-based PDF, or DOCX requirement file (maximum 10 MiB "
+        "by default). Scanned/image-only PDFs require OCR. Use **Try it out**, choose a "
+        "file, then click **Execute**. Requires GOOGLE_API_KEY."
+    ),
+)
 async def create_story_from_file(
-    file: Annotated[UploadFile, File()],
+    file: Annotated[
+        UploadFile,
+        File(description="Requirement document. Supported extensions: .txt, .pdf, .docx."),
+    ],
 ) -> GeneratedBacklogResponse:
     filename = file.filename or ""
     try:
@@ -113,7 +179,15 @@ async def _generate_backlog_response(requirement: str) -> GeneratedBacklogRespon
     return GeneratedBacklogResponse(source_requirement=requirement, backlog=backlog)
 
 
-@app.post("/api/v1/stories/export")
+@app.post(
+    "/api/v1/stories/export",
+    tags=["Export"],
+    summary="Export backlog as CSV",
+    description=(
+        "Paste the complete JSON response from a successful Generate backlog request "
+        "into this request body, then execute to download the CSV file."
+    ),
+)
 async def export_story(payload: ExportStoryRequest) -> StreamingResponse:
     backlog = payload.backlog
     output = io.StringIO(newline="")

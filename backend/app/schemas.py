@@ -8,7 +8,23 @@ class StrictModel(BaseModel):
 
 
 class GenerateStoryRequest(StrictModel):
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "requirement": (
+                        "A food delivery company wants customers to browse restaurants, "
+                        "order food, make payments, and track deliveries.\\n"
+                        "Restaurants manage orders, and delivery partners update "
+                        "delivery status.\\n"
+                        "Business goal: Improve customer satisfaction and delivery efficiency."
+                    )
+                }
+            ]
+        },
+    )
 
     requirement: str = Field(min_length=10, max_length=10_000)
 

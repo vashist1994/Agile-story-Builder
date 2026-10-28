@@ -11,8 +11,8 @@ Storyforge turns a plain-language product requirement or an uploaded `.txt`, `.p
 
 ## Run locally
 
-1. Copy `.env.example` to `.env` and set `GOOGLE_API_KEY`.
-2. Start the API:
+1. From the project root, copy `.env.example` to `.env` and set `GOOGLE_API_KEY`.
+2. Start the FastAPI backend:
 
    ```sh
    cd backend
@@ -20,7 +20,11 @@ Storyforge turns a plain-language product requirement or an uploaded `.txt`, `.p
    uv run uvicorn app.main:app --reload
    ```
 
-3. In a second terminal, start the UI:
+3. Open the interactive FastAPI Swagger UI at **http://127.0.0.1:8000/docs**.
+   The alternative ReDoc API reference is at **http://127.0.0.1:8000/redoc**.
+
+The Swagger UI works without starting the React frontend. To run the React UI as well,
+start it in a second terminal:
 
    ```sh
    cd frontend
@@ -28,7 +32,42 @@ Storyforge turns a plain-language product requirement or an uploaded `.txt`, `.p
    npm run dev
    ```
 
-4. Open the Vite URL (normally `http://localhost:5173`). The API docs are at `http://localhost:8000/docs`.
+Then open the Vite URL (normally `http://localhost:5173`).
+
+## Use the application from Swagger UI
+
+1. Make sure the backend is running and `GOOGLE_API_KEY` is set in the project-root `.env`.
+   Restart the backend after changing `.env`.
+2. Open **http://127.0.0.1:8000/docs** and expand **Generate backlog**.
+3. To enter plain text, open **POST `/api/v1/stories/generate`**, click **Try it out**,
+   replace the example `requirement` with your own text (at least 10 characters), and click
+   **Execute**. For multi-line requirements, JSON requires line breaks inside the quoted
+   string to be written as `\n` (a backslash followed by `n`), not as literal line breaks.
+   For example:
+
+   ```json
+   {
+     "requirement": "A food delivery company wants customers to browse restaurants, order food, make payments, and track deliveries.\nRestaurants manage orders, and delivery partners update delivery status.\nBusiness goal: Improve customer satisfaction and delivery efficiency."
+   }
+   ```
+
+   In the Swagger request editor, keep the `\n` sequences inside the quoted string exactly
+   as shown. Swagger sends them as line breaks in the requirement. If pasted as actual
+   newlines within the quotes, the request body is invalid JSON and returns HTTP 422.
+
+4. To upload a requirement, open **POST `/api/v1/stories/generate-file`**, click
+   **Try it out**, choose a `.txt`, `.pdf`, or `.docx` file in the `file` control, and click
+   **Execute**. The file is parsed on the server; supported document text is sent to the
+   same backlog generator.
+5. Swagger displays the generated JSON response, including `source_requirement` and
+   `backlog`. To download a CSV from Swagger, copy the complete JSON response into
+   **POST `/api/v1/stories/export`** as its request body, then click **Execute**. The
+   response is a CSV attachment. The React frontend performs this export step for you.
+
+The API key is configured on the backend; do not paste it into Swagger request fields.
+Generation can return an error if Gemini is unavailable, the key is invalid, or the model
+response does not satisfy the backlog schema. File uploads are limited by `MAX_UPLOAD_BYTES`;
+plain text and extracted document text are limited by `MAX_REQUIREMENT_CHARS`.
 
 ## Configuration
 

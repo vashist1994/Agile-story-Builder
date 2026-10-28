@@ -125,6 +125,29 @@ def test_health() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_swagger_openapi_documents_text_and_file_generation() -> None:
+    schema = client.get("/openapi.json").json()
+    paths = schema["paths"]
+
+    text_operation = paths["/api/v1/stories/generate"]["post"]
+    file_operation = paths["/api/v1/stories/generate-file"]["post"]
+    export_operation = paths["/api/v1/stories/export"]["post"]
+
+    assert text_operation["tags"] == ["Generate backlog"]
+    assert text_operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    request_schema = schema["components"]["schemas"]["GenerateStoryRequest"]
+    assert request_schema["examples"][0]["requirement"]
+    assert "\\n" in request_schema["examples"][0]["requirement"]
+    assert file_operation["tags"] == ["Generate backlog"]
+    assert "multipart/form-data" in file_operation["requestBody"]["content"]
+    file_schema = schema["components"]["schemas"][
+        "Body_create_story_from_file_api_v1_stories_generate_file_post"
+    ]
+    assert "Supported extensions" in file_schema["properties"]["file"]["description"]
+    assert export_operation["tags"] == ["Export"]
+    assert "complete JSON response" in export_operation["description"]
+
+
 def test_generation_preflight_allows_local_vite_origins() -> None:
     for origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
         response = client.options(
@@ -153,6 +176,40 @@ def test_generation_returns_validated_backlog(monkeypatch) -> None:
     assert response.json()["backlog"]["user_stories"][0]["story_id"] == "S1"
     assert response.json()["backlog"]["requirement_summary"]["business_objective"]
     assert response.json()["source_requirement"] == "Users can export reports as CSV files."
+
+
+def test_multiline_swagger_requirement_accepts_escaped_json_newlines(monkeypatch) -> None:
+    requirement = (
+        "A food delivery company wants customers to browse restaurants, order food, make "
+        "payments, and track deliveries.\n"
+        "Restaurants manage orders, and delivery partners update delivery status.\n"
+        "Business goal: Improve customer satisfaction and delivery efficiency."
+    )
+
+    async def fake_generate(value: str) -> AgileBacklog:
+        assert value == requirement
+        return example_backlog()
+
+    monkeypatch.setattr("app.main.generate_story", fake_generate)
+    response = client.post("/api/v1/stories/generate", json={"requirement": requirement})
+
+    assert response.status_code == 200
+    assert response.json()["source_requirement"] == requirement
+
+
+def test_generation_explains_unescaped_newline_in_json_string() -> None:
+    raw_json = '{"requirement": "Line one\nLine two, with enough text."}'
+    response = client.post(
+        "/api/v1/stories/generate",
+        content=raw_json,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Invalid JSON request body. Escape line breaks inside the requirement "
+        "string as \\n, or enter the requirement on one line."
+    )
 
 
 def test_generation_rejects_short_requirement() -> None:
