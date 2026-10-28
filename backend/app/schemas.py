@@ -67,8 +67,9 @@ class UserStory(StrictModel):
 
 
 class NonFunctionalRequirement(StrictModel):
+    model_config = ConfigDict(extra="ignore")
+
     item_id: str = Field(description="Sequential identifier such as NFR-001.")
-    requirement_id: str = Field(description="Internal requirement inventory ID such as R-001.")
     requirement: str
     related_item_ids: list[str]
     testability_or_clarification: str
@@ -152,10 +153,6 @@ class AgileBacklog(StrictModel):
             if story.story_id in story.dependencies:
                 raise ValueError(f"{story.story_id} cannot depend on itself.")
         for item in self.non_functional_requirements:
-            if item.requirement_id not in requirement_id_set:
-                raise ValueError(
-                    f"{item.item_id} references unknown requirement {item.requirement_id}."
-                )
             self._validate_references(item.related_item_ids, backlog_item_ids, item.item_id)
         for coverage in self.requirement_coverage:
             self._validate_references(

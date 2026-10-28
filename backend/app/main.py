@@ -1,13 +1,19 @@
 import csv
 import io
 import logging
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
+from app.documents import (
+    DocumentExtractionError,
+    RequirementTooLongError,
+    extract_requirement_text,
+)
 from app.schemas import AgileBacklog, GeneratedBacklogResponse, GenerateStoryRequest
 from app.service import GeminiConfigurationError, generate_story
 
@@ -61,13 +67,41 @@ async def health() -> dict[str, str]:
 async def create_story(
     payload: GenerateStoryRequest,
 ) -> GeneratedBacklogResponse:
-    if len(payload.requirement) > settings.max_requirement_chars:
+    return await _generate_backlog_response(payload.requirement)
+
+
+@app.post("/api/v1/stories/generate-file", response_model=GeneratedBacklogResponse)
+async def create_story_from_file(
+    file: Annotated[UploadFile, File()],
+) -> GeneratedBacklogResponse:
+    filename = file.filename or ""
+    try:
+        content = await file.read(settings.max_upload_bytes + 1)
+    finally:
+        await file.close()
+    if len(content) > settings.max_upload_bytes:
         raise HTTPException(
-            status_code=422,
-            detail=f"Requirement must be at most {settings.max_requirement_chars} characters.",
+            status_code=413,
+            detail=(
+                f"File exceeds the {settings.max_upload_bytes // (1024 * 1024)} MB upload limit."
+            ),
         )
     try:
-        story = await generate_story(payload.requirement)
+        requirement = extract_requirement_text(
+            filename=filename,
+            content=content,
+            max_chars=settings.max_requirement_chars,
+        )
+    except RequirementTooLongError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DocumentExtractionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _generate_backlog_response(requirement)
+
+
+async def _generate_backlog_response(requirement: str) -> GeneratedBacklogResponse:
+    try:
+        backlog = await generate_story(requirement)
     except GeminiConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -76,7 +110,7 @@ async def create_story(
             status_code=502,
             detail="Story generation failed. Please try again.",
         ) from exc
-    return GeneratedBacklogResponse(source_requirement=payload.requirement, backlog=story)
+    return GeneratedBacklogResponse(source_requirement=requirement, backlog=backlog)
 
 
 @app.post("/api/v1/stories/export")
@@ -174,7 +208,6 @@ async def export_story(payload: ExportStoryRequest) -> StreamingResponse:
                 "Related item IDs": _format_items(item.related_item_ids),
                 "ID": item.item_id,
                 "Requirement": item.requirement,
-                "Requirement ID": item.requirement_id,
                 "Testability or clarification": item.testability_or_clarification,
             },
         )

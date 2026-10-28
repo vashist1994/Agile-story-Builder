@@ -43,7 +43,6 @@ type UserStory = {
 
 type NonFunctionalRequirement = {
   item_id: string;
-  requirement_id: string;
   requirement: string;
   related_item_ids: string[];
   testability_or_clarification: string;
@@ -94,6 +93,8 @@ type GeneratedBacklog = {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const MAX_REQUIREMENT_CHARS = 10_000;
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const ACCEPTED_FILE_TYPES = ".txt,.pdf,.docx";
 
 async function responseError(response: Response): Promise<string> {
   try {
@@ -229,7 +230,6 @@ function BacklogView({ backlog }: { backlog: AgileBacklog }) {
               <article className="backlog-item" key={`nfr-${index}`}>
                 <div className="item-title-row">
                   <span className="item-id">{item.item_id}</span>
-                  <span className="item-meta-line">Requirement {item.requirement_id}</span>
                 </div>
                 <p>{item.requirement}</p>
                 <p><strong>Related items:</strong> {item.related_item_ids.join(", ") || "None"}</p>
@@ -298,6 +298,7 @@ function BacklogView({ backlog }: { backlog: AgileBacklog }) {
 
 export default function App() {
   const [requirement, setRequirement] = useState("");
+  const [requirementFile, setRequirementFile] = useState<File | null>(null);
   const [result, setResult] = useState<GeneratedBacklog | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -309,11 +310,21 @@ export default function App() {
     setResult(null);
     setIsGenerating(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/stories/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requirement: requirement.trim() }),
-      });
+      let response: Response;
+      if (requirementFile) {
+        const formData = new FormData();
+        formData.append("file", requirementFile);
+        response = await fetch(`${API_BASE_URL}/api/v1/stories/generate-file`, {
+          method: "POST",
+          body: formData,
+        });
+      } else {
+        response = await fetch(`${API_BASE_URL}/api/v1/stories/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ requirement: requirement.trim() }),
+        });
+      }
       if (!response.ok) throw new Error(await responseError(response));
       setResult((await response.json()) as GeneratedBacklog);
     } catch (caught) {
@@ -381,15 +392,55 @@ export default function App() {
           <textarea
             id="requirement"
             value={requirement}
-            onChange={(event) => setRequirement(event.target.value.slice(0, MAX_REQUIREMENT_CHARS))}
+            onChange={(event) => {
+              setRequirementFile(null);
+              setRequirement(event.target.value.slice(0, MAX_REQUIREMENT_CHARS));
+            }}
             placeholder="Describe the product requirement, goals, constraints, and expected behavior…"
             maxLength={MAX_REQUIREMENT_CHARS}
-            required
-            minLength={10}
+            required={!requirementFile}
+            minLength={requirementFile ? undefined : 10}
           />
+          <div className="upload-row">
+            <label className="upload-button" htmlFor="requirement-file">
+              <span aria-hidden="true">↑</span> Choose a file
+            </label>
+            <input
+              id="requirement-file"
+              className="file-input"
+              type="file"
+              accept={ACCEPTED_FILE_TYPES}
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                if (file && file.size > MAX_FILE_BYTES) {
+                  setError("File exceeds the 10 MB upload limit.");
+                  event.target.value = "";
+                  setRequirementFile(null);
+                  return;
+                }
+                setError("");
+                setRequirement("");
+                setRequirementFile(file);
+              }}
+            />
+            <span className="upload-hint">.TXT, .PDF, .DOCX · MAX 10 MB</span>
+            {requirementFile && (
+              <button
+                className="remove-file"
+                type="button"
+                onClick={() => {
+                  setRequirementFile(null);
+                  const input = document.getElementById("requirement-file");
+                  if (input instanceof HTMLInputElement) input.value = "";
+                }}
+              >
+                {requirementFile.name} ×
+              </button>
+            )}
+          </div>
           <div className="input-footer">
-            <span>{requirement.length.toLocaleString()} / {MAX_REQUIREMENT_CHARS.toLocaleString()}</span>
-            <button className="generate-button" type="submit" disabled={isGenerating || requirement.trim().length < 10}>
+            <span>{requirementFile ? "Document selected" : `${requirement.length.toLocaleString()} / ${MAX_REQUIREMENT_CHARS.toLocaleString()}`}</span>
+            <button className="generate-button" type="submit" disabled={isGenerating || (!requirementFile && requirement.trim().length < 10)}>
               {isGenerating ? (
                 <><span className="spinner" /> Refining backlog</>
               ) : (

@@ -2,12 +2,42 @@ import csv
 import io
 
 import pytest
+from docx import Document
 from fastapi.testclient import TestClient
 
+from app.documents import DocumentExtractionError, extract_requirement_text
 from app.main import app
-from app.schemas import AgileBacklog
+from app.schemas import AgileBacklog, NonFunctionalRequirement
 
 client = TestClient(app)
+
+
+def pdf_with_text(text: str) -> bytes:
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    objects.append(
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+    )
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, body in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode() + body + b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode())
+    pdf.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n".encode()
+    )
+    return bytes(pdf)
 
 
 def example_backlog() -> AgileBacklog:
@@ -51,7 +81,14 @@ def example_backlog() -> AgileBacklog:
                     "open_questions": ["Which report formats are required?"],
                 }
             ],
-            "non_functional_requirements": [],
+            "non_functional_requirements": [
+                {
+                    "item_id": "NFR-001",
+                    "requirement": "The export should be fast.",
+                    "related_item_ids": ["S1"],
+                    "testability_or_clarification": "No measurable threshold is specified.",
+                }
+            ],
             "assumptions": ["Unconfirmed: user means an authorized report user."],
             "open_questions": [
                 {"question": "Which report formats are required?", "affected_items": ["S1"]}
@@ -65,7 +102,15 @@ def example_backlog() -> AgileBacklog:
                     "mapped_items": ["S1"],
                     "status": "Covered",
                     "reason": "S1 covers report export.",
-                }
+                },
+                {
+                    "requirement_id": "R-002",
+                    "requirement_type": "Non-functional",
+                    "explicit_requirement": "The export should be fast.",
+                    "mapped_items": ["NFR-001"],
+                    "status": "Partially covered",
+                    "reason": "A measurable performance threshold is not specified.",
+                },
             ],
             "refinement_recommendations": [
                 {"recommendation": "Confirm the supported report formats.", "related_items": ["S1"]}
@@ -140,6 +185,9 @@ def test_export_returns_full_backlog_csv_and_neutralizes_formulas() -> None:
     coverage_row = next(row for row in rows if row["Section"] == "Requirement Coverage")
     assert coverage_row["Requirement ID"] == "R-001"
     assert coverage_row["Requirement type"] == "Functional"
+    nfr_row = next(row for row in rows if row["Section"] == "Non-Functional Requirement")
+    assert nfr_row["ID"] == "NFR-001"
+    assert nfr_row["Requirement ID"] == ""
     assert {row["Section"] for row in rows} >= {
         "Epic",
         "User Story",
@@ -174,3 +222,133 @@ def test_backlog_rejects_story_with_unknown_epic() -> None:
 
     with pytest.raises(ValueError, match="S1 references unknown epic E9"):
         AgileBacklog.model_validate(data)
+
+
+def test_non_functional_item_does_not_duplicate_requirement_id() -> None:
+    item = {
+        "item_id": "NFR-001",
+        "requirement": "Export response has a stated performance target.",
+        "related_item_ids": ["S1"],
+        "testability_or_clarification": "Define a measurable threshold.",
+    }
+
+    parsed = NonFunctionalRequirement.model_validate({**item, "requirement_id": "R-NFR-01"})
+
+    assert parsed.item_id == "NFR-001"
+    assert "requirement_id" not in parsed.model_dump()
+
+
+def test_backlog_ignores_legacy_nfr_requirement_id() -> None:
+    data = example_backlog().model_dump()
+    data["non_functional_requirements"][0]["requirement_id"] = "R-NFR-01"
+
+    backlog = AgileBacklog.model_validate(data)
+
+    assert backlog.non_functional_requirements[0].item_id == "NFR-001"
+    assert "requirement_id" not in backlog.non_functional_requirements[0].model_dump()
+
+
+def test_generate_from_txt_upload(monkeypatch) -> None:
+    requirement = "Users can export reports as CSV files."
+
+    async def fake_generate(value: str) -> AgileBacklog:
+        assert value == requirement
+        return example_backlog()
+
+    monkeypatch.setattr("app.main.generate_story", fake_generate)
+    response = client.post(
+        "/api/v1/stories/generate-file",
+        files={"file": ("requirements.txt", requirement.encode(), "text/plain")},
+    )
+    assert response.status_code == 200
+    assert response.json()["source_requirement"] == requirement
+
+
+def test_generate_file_rejects_upload_over_configured_limit(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.settings.max_upload_bytes", 16)
+    response = client.post(
+        "/api/v1/stories/generate-file",
+        files={
+            "file": ("requirements.txt", b"this file exceeds the configured limit", "text/plain")
+        },
+    )
+    assert response.status_code == 413
+    assert "upload limit" in response.json()["detail"]
+
+
+def test_generate_from_docx_upload(monkeypatch) -> None:
+    buffer = io.BytesIO()
+    document = Document()
+    document.add_paragraph("Users can export reports as CSV files.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "Reports include their title."
+    document.save(buffer)
+    expected = "Users can export reports as CSV files.\nReports include their title."
+
+    async def fake_generate(value: str) -> AgileBacklog:
+        assert value == expected
+        return example_backlog()
+
+    monkeypatch.setattr("app.main.generate_story", fake_generate)
+    response = client.post(
+        "/api/v1/stories/generate-file",
+        files={
+            "file": (
+                "requirements.docx",
+                buffer.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["source_requirement"] == expected
+
+
+def test_generate_from_pdf_upload(monkeypatch) -> None:
+    requirement = "Users can export reports as CSV files."
+
+    async def fake_generate(value: str) -> AgileBacklog:
+        assert value == requirement
+        return example_backlog()
+
+    monkeypatch.setattr("app.main.generate_story", fake_generate)
+    response = client.post(
+        "/api/v1/stories/generate-file",
+        files={"file": ("requirements.pdf", pdf_with_text(requirement), "application/pdf")},
+    )
+    assert response.status_code == 200
+    assert response.json()["source_requirement"] == requirement
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "error"),
+    [
+        ("requirements.exe", b"plain text requirement", "Unsupported file type"),
+        ("requirements.txt", b"\xff\xfe", "UTF-8"),
+        ("requirements.pdf", b"not a pdf document", "not a valid PDF"),
+        ("requirements.docx", b"not a word document", "Could not read the DOCX"),
+    ],
+)
+def test_reject_invalid_uploads(filename: str, content: bytes, error: str) -> None:
+    response = client.post(
+        "/api/v1/stories/generate-file",
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+    assert response.status_code == 400
+    assert error in response.json()["detail"]
+
+
+def test_extract_requirement_rejects_empty_text_and_oversize_content() -> None:
+    with pytest.raises(DocumentExtractionError, match="at least 10 characters"):
+        extract_requirement_text("requirements.txt", b"short", 100)
+    with pytest.raises(ValueError, match="exceeds the 10-character limit"):
+        extract_requirement_text("requirements.txt", b"long requirement", 10)
+
+
+def test_extract_pdf_rejects_image_only_document(monkeypatch) -> None:
+    class ImageOnlyPdf:
+        is_encrypted = False
+        pages: list[object] = []
+
+    monkeypatch.setattr("app.documents.PdfReader", lambda *_args, **_kwargs: ImageOnlyPdf())
+    with pytest.raises(DocumentExtractionError, match="No readable text"):
+        extract_requirement_text("requirements.pdf", b"%PDF-1.7", 10_000)

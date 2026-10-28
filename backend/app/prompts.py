@@ -238,12 +238,16 @@ Capture all explicit quality requirements, including performance,
 security, scalability, availability, reliability, and auditability.
 
 For each requirement, preserve:
-- Its internal requirement ID (R-001, R-002, ...).
 - Its requirement type.
 - Original meaning and stated thresholds.
 - Relevant story or backlog item IDs.
 - Testability assessment.
 - Any missing measurement definition or clarification.
+
+Give each separate non-functional backlog item its own NFR-001-style item_id.
+Do not add a separate requirement_id to a non-functional item. Link its
+source requirement through the requirement_coverage entry's mapped_items,
+using the NFR item ID there.
 
 Rules:
 
@@ -493,7 +497,8 @@ Never fabricate source quotations or references.
 Use stable sequential IDs within the current response.
 Use requirement IDs R-001, R-002, ... in coverage and story references;
 epic IDs E1, E2, ...; story IDs S1, S2, ...; and non-functional item IDs
-NFR-001, NFR-002, ... . Keep ID fields separate from quoted source wording.
+NFR-001, NFR-002, ... . Link NFR items from coverage mapped_items rather
+than adding a redundant requirement_id field. Keep IDs separate from quotations.
 Populate story-specific assumptions and open questions, and include
 explicit constraints/business rules in the requirement summary.
 Do not return Markdown fences or explanatory text outside the
