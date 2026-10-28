@@ -1,0 +1,223 @@
+import csv
+import io
+import logging
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.config import get_settings
+from app.schemas import AgileBacklog, GeneratedBacklogResponse, GenerateStoryRequest
+from app.service import GeminiConfigurationError, generate_story
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+app = FastAPI(
+    title="Storyforge API",
+    description="Generate grounded agile user stories from plain-language requirements.",
+    version="1.0.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
+
+
+class ExportStoryRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    source_requirement: str = Field(min_length=10, max_length=10_000)
+    backlog: AgileBacklog
+
+
+def _spreadsheet_safe(value: str) -> str:
+    first_visible = value.lstrip()
+    if first_visible.startswith(("=", "+", "-", "@")):
+        return f"'{value}"
+    return value
+
+
+def _format_items(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _format_criteria(criteria: list[dict[str, str]]) -> str:
+    return "\n\n".join(
+        f"Given {item['given']}\nWhen {item['when']}\nThen {item['then']}" for item in criteria
+    )
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/stories/generate", response_model=GeneratedBacklogResponse)
+async def create_story(
+    payload: GenerateStoryRequest,
+) -> GeneratedBacklogResponse:
+    if len(payload.requirement) > settings.max_requirement_chars:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Requirement must be at most {settings.max_requirement_chars} characters.",
+        )
+    try:
+        story = await generate_story(payload.requirement)
+    except GeminiConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Story generation failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Story generation failed. Please try again.",
+        ) from exc
+    return GeneratedBacklogResponse(source_requirement=payload.requirement, backlog=story)
+
+
+@app.post("/api/v1/stories/export")
+async def export_story(payload: ExportStoryRequest) -> StreamingResponse:
+    backlog = payload.backlog
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    headers = [
+        "Source requirement",
+        "Section",
+        "ID",
+        "Related item IDs",
+        "Title",
+        "Description",
+        "Business value",
+        "Persona",
+        "User story",
+        "Acceptance criteria",
+        "Suggested priority",
+        "Priority rationale",
+        "Refinement status",
+        "Requirement references",
+        "Assumptions",
+        "Open questions",
+        "Requirement",
+        "Requirement ID",
+        "Requirement type",
+        "Mapped items",
+        "Coverage status",
+        "Reason",
+        "Testability or clarification",
+        "Details",
+    ]
+    writer.writerow(headers)
+
+    def write_row(section: str, **values: str) -> None:
+        row = {header: "" for header in headers}
+        row["Source requirement"] = payload.source_requirement
+        row["Section"] = section
+        row.update(values)
+        writer.writerow([_spreadsheet_safe(value) for value in row.values()])
+
+    summary = backlog.requirement_summary
+    write_row(
+        "Requirement Summary",
+        **{
+            "Business value": summary.business_objective,
+            "Persona": _format_items(summary.actors),
+            "Details": (
+                f"Key capabilities:\n{_format_items(summary.key_capabilities)}\n\n"
+                "Constraints and business rules:\n"
+                f"{_format_items(summary.constraints_and_business_rules)}"
+            ),
+        },
+    )
+
+    for epic in backlog.epics:
+        write_row(
+            "Epic",
+            **{
+                "ID": epic.epic_id,
+                "Related item IDs": _format_items(epic.related_story_ids),
+                "Title": epic.title,
+                "Description": epic.description,
+                "Business value": epic.business_value,
+            },
+        )
+
+    for story in backlog.user_stories:
+        write_row(
+            "User Story",
+            **{
+                "ID": story.story_id,
+                "Related item IDs": story.epic_id or "",
+                "Title": story.title,
+                "Persona": story.persona,
+                "User story": story.user_story,
+                "Acceptance criteria": _format_criteria(
+                    [criterion.model_dump() for criterion in story.acceptance_criteria]
+                ),
+                "Suggested priority": story.suggested_priority,
+                "Priority rationale": story.priority_rationale,
+                "Refinement status": story.refinement_status,
+                "Requirement references": _format_items(story.requirement_references),
+                "Assumptions": _format_items(story.assumptions),
+                "Open questions": _format_items(story.open_questions),
+                "Details": f"Dependencies:\n{_format_items(story.dependencies)}",
+            },
+        )
+
+    for item in backlog.non_functional_requirements:
+        write_row(
+            "Non-Functional Requirement",
+            **{
+                "Related item IDs": _format_items(item.related_item_ids),
+                "ID": item.item_id,
+                "Requirement": item.requirement,
+                "Requirement ID": item.requirement_id,
+                "Testability or clarification": item.testability_or_clarification,
+            },
+        )
+
+    for assumption in backlog.assumptions:
+        write_row("Assumption", Requirement=assumption)
+
+    for question in backlog.open_questions:
+        write_row(
+            "Open Question",
+            **{
+                "Requirement": question.question,
+                "Related item IDs": _format_items(question.affected_items),
+            },
+        )
+
+    for item in backlog.out_of_scope:
+        write_row("Out of Scope", Requirement=item)
+
+    for coverage in backlog.requirement_coverage:
+        write_row(
+            "Requirement Coverage",
+            **{
+                "Requirement": coverage.explicit_requirement,
+                "Requirement ID": coverage.requirement_id,
+                "Requirement type": coverage.requirement_type,
+                "Mapped items": _format_items(coverage.mapped_items),
+                "Coverage status": coverage.status,
+                "Reason": coverage.reason,
+            },
+        )
+
+    for recommendation in backlog.refinement_recommendations:
+        write_row(
+            "Refinement Recommendation",
+            **{
+                "Requirement": recommendation.recommendation,
+                "Related item IDs": _format_items(recommendation.related_items),
+            },
+        )
+    content = io.BytesIO(output.getvalue().encode("utf-8"))
+    return StreamingResponse(
+        content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="agile-backlog.csv"'},
+    )
