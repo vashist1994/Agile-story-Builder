@@ -12,7 +12,12 @@ from pydantic import ValidationError
 from app.documents import DocumentExtractionError, extract_requirement_text
 from app.main import app
 from app.schemas import AgileBacklog, NonFunctionalRequirement
-from app.service import BacklogValidationError, generate_story
+from app.service import (
+    BacklogValidationError,
+    GeminiRateLimitError,
+    GeminiUnavailableError,
+    generate_story,
+)
 
 client = TestClient(app)
 
@@ -252,6 +257,35 @@ def test_generation_returns_actionable_error_if_corrective_retry_fails(monkeypat
 
     assert response.status_code == 502
     assert "after one automatic correction attempt" in response.json()["detail"]
+
+
+def test_generation_returns_rate_limit_status_and_retry_after(monkeypatch) -> None:
+    async def fail_rate_limit(_requirement: str) -> AgileBacklog:
+        raise GeminiRateLimitError("Gemini rate limit is temporarily unavailable.", retry_after=7)
+
+    monkeypatch.setattr("app.main.generate_story", fail_rate_limit)
+    response = client.post(
+        "/api/v1/stories/generate",
+        json={"requirement": "A valid product requirement for backlog generation."},
+    )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "7"
+    assert "rate limit" in response.json()["detail"]
+
+
+def test_generation_returns_service_unavailable_after_transient_failures(monkeypatch) -> None:
+    async def fail_transient(_requirement: str) -> AgileBacklog:
+        raise GeminiUnavailableError("Gemini is temporarily unavailable.")
+
+    monkeypatch.setattr("app.main.generate_story", fail_transient)
+    response = client.post(
+        "/api/v1/stories/generate",
+        json={"requirement": "A valid product requirement for backlog generation."},
+    )
+
+    assert response.status_code == 503
+    assert "temporarily unavailable" in response.json()["detail"]
 
 
 def test_multiline_swagger_requirement_accepts_escaped_json_newlines(monkeypatch) -> None:
