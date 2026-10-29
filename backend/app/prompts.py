@@ -1,3 +1,4 @@
+
 from langchain_core.prompts import ChatPromptTemplate
 
 STORY_PROMPT = ChatPromptTemplate.from_messages(
