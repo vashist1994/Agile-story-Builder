@@ -78,7 +78,28 @@ plain text and extracted document text are limited by `MAX_REQUIREMENT_CHARS`.
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated allowed browser origins. |
 | `MAX_REQUIREMENT_CHARS` | `10000` | Maximum requirement length accepted by the API. |
 | `MAX_UPLOAD_BYTES` | `10485760` | Maximum uploaded document size in bytes (10 MiB). |
+| `GEMINI_REQUESTS_PER_MINUTE` | `0` | Optional local sliding-window request cap; `0` disables this cap. Set to a value below the quota assigned to your Google project. |
+| `GEMINI_TOKENS_PER_MINUTE` | `0` | Optional local token cap; `0` disables this cap. Requests reserve an approximate prompt-token count plus `GEMINI_MAX_OUTPUT_TOKENS` before calling Gemini and reconcile with returned usage when available. |
+| `GEMINI_REQUESTS_PER_DAY` | `0` | Optional local rolling 24-hour request cap; `0` disables this cap. |
+| `GEMINI_MAX_CONCURRENCY` | `3` | Maximum concurrent Gemini calls in this process, including corrective validation calls and retries. |
+| `GEMINI_RATE_LIMIT_MAX_WAIT_SECONDS` | `30` | Maximum time a request waits for local RPM/TPM/RPD capacity before returning HTTP 429. |
+| `GEMINI_MAX_RETRIES` | `2` | Number of bounded retries per Gemini call (maximum 5); only rate limits and transient errors are retried. |
+| `GEMINI_RETRY_BASE_SECONDS` | `0.5` | Base exponential-backoff delay, with randomized jitter. |
+| `GEMINI_RETRY_MAX_SECONDS` | `15` | Maximum retry delay; provider-specified delays are honored, and a delay above this bound fails gracefully instead of retrying early. |
+| `GEMINI_TIMEOUT_SECONDS` | `45` | Timeout for each Gemini call. |
+| `GEMINI_MAX_OUTPUT_TOKENS` | `8192` | Output-token limit and conservative TPM reservation; lower it if the configured TPM cap cannot accommodate the default reservation. |
+| `GENERATION_CACHE_TTL_SECONDS` | `300` | In-memory cache duration for identical successful requests; `0` disables caching. |
+| `GENERATION_CACHE_MAX_ENTRIES` | `256` | Maximum number of cached results; `0` disables caching. |
 | `VITE_API_BASE_URL` | `http://localhost:8000` | API origin used by the frontend. |
+
+Quota caps default to disabled because Gemini quotas depend on the Google project,
+model, and account tier; configure them using the actual limits shown for your project.
+The request coordinator, cache, and request deduplication are process-local. For a
+multi-worker or multi-instance deployment, use one worker per quota domain or move
+coordination and caching to shared infrastructure before scaling horizontally. Local
+limits reduce avoidable bursts but cannot guarantee that Google will never return 429.
+Rate-limited calls return HTTP 429, exhausted local/provider quotas do not retry, and
+temporary provider failures return HTTP 503 after the configured bounded retries.
 
 ## Grounding and output
 
@@ -95,7 +116,7 @@ The CSV endpoint exports the full backlog, with a row for each relevant artifact
 
 Document uploads are size-limited to 10 MiB by default (`MAX_UPLOAD_BYTES`), parsed on the server, and not persisted. Extracted text is limited by `MAX_REQUIREMENT_CHARS`; scanned/image-only PDFs require OCR before upload. `.txt` files must use UTF-8 encoding, and password-protected PDFs are not supported.
 
-Generation requires a valid API key. Configuration and provider failures are logged server-side and returned as explicit API errors without exposing credentials or provider internals.
+Generation requires a valid API key. Retries, request latency, retry delays, response token usage, and failures are logged without logging API keys or requirement contents. Configuration and provider failures are returned as explicit API errors without exposing credentials or raw provider responses. Identical concurrent requests share one in-flight generation; successful results are cached in memory for the configured TTL and are never persisted to disk.
 
 ## Tests
 
