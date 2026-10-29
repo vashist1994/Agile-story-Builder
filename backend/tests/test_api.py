@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 
 from app.documents import DocumentExtractionError, extract_requirement_text
 from app.main import app
-from app.schemas import AgileBacklog, NonFunctionalRequirement
+from app.schemas import AcceptanceCriterion, AgileBacklog, NonFunctionalRequirement, UserStory
 from app.service import (
     BacklogValidationError,
     GeminiRateLimitError,
@@ -328,41 +329,271 @@ def test_generation_rejects_short_requirement() -> None:
 
 
 def test_export_returns_full_backlog_csv_and_neutralizes_formulas() -> None:
+    backlog = example_backlog()
+    backlog.requirement_summary.business_objective = (
+        'Help users export reports, including "quoted" report titles — with traceability.'
+    )
+    backlog.requirement_summary.actors = ["user", "analyst, QA"]
+    backlog.requirement_summary.key_capabilities = ["Export reports", "Review coverage"]
+    backlog.requirement_summary.constraints_and_business_rules = [
+        "Preserve Unicode: café, 東京, and 🚀"
+    ]
+    backlog.user_stories[0].title = '\x00\t=HYPERLINK("https://example.test")'
+    backlog.user_stories[0].acceptance_criteria.append(
+        AcceptanceCriterion(
+            given="the requirement contains commas, quotes, and\nline breaks",
+            when="the backlog is exported",
+            then="all criterion fields remain intact",
+        )
+    )
+    backlog.user_stories[0].assumptions = [
+        "Unconfirmed: support UTF-8 titles.",
+        "Unconfirmed: preserve commas, quotes, and line breaks.",
+    ]
+    second_story_data = backlog.user_stories[0].model_dump()
+    second_story_data.update(
+        {
+            "story_id": "S2",
+            "title": "Review export coverage",
+            "epic_id": "E1",
+            "dependencies": ["S1"],
+            "requirement_references": ["R-001", "R-002"],
+            "acceptance_criteria": [
+                {
+                    "given": "a backlog has been generated",
+                    "when": "the analyst reviews its coverage",
+                    "then": "all requirement mappings are displayed",
+                }
+            ],
+            "assumptions": [],
+            "open_questions": [],
+        }
+    )
+    backlog.user_stories.append(UserStory.model_validate(second_story_data))
+    backlog.assumptions.append(" \t+SUM(1,2)")
+    backlog.out_of_scope = ["Exporting to PDF is excluded."]
     response = client.post(
         "/api/v1/stories/export",
         json={
-            "source_requirement": '=IMPORTDATA("https://example.test")',
-            "backlog": example_backlog().model_dump(),
+            "source_requirement": (
+                '=IMPORTDATA("https://example.test"),\nwith Unicode: café, 東京, and 🚀'
+            ),
+            "backlog": backlog.model_dump(),
         },
     )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
     assert 'attachment; filename="agile-backlog.csv"' == response.headers["content-disposition"]
-    rows = list(csv.DictReader(io.StringIO(response.text)))
-    assert rows[0]["Section"] == "Requirement Summary"
-    assert rows[0]["Source requirement"].startswith("'=")
-    story_row = next(row for row in rows if row["Section"] == "User Story")
-    assert story_row["Title"].startswith("'=")
-    expected_criteria = (
-        "Given a report is available\nWhen the user exports it\nThen a CSV file is downloaded"
-    )
-    assert story_row["Acceptance criteria"] == expected_criteria
-    assert story_row["Requirement references"] == "'- R-001"
-    assert story_row["Open questions"] == "'- Which report formats are required?"
-    coverage_row = next(row for row in rows if row["Section"] == "Requirement Coverage")
-    assert coverage_row["Requirement ID"] == "R-001"
-    assert coverage_row["Requirement type"] == "Functional"
-    nfr_row = next(row for row in rows if row["Section"] == "Non-Functional Requirement")
-    assert nfr_row["ID"] == "NFR-001"
-    assert nfr_row["Requirement ID"] == ""
-    assert {row["Section"] for row in rows} >= {
-        "Epic",
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    expected_headers = [
+        "Record Type",
+        "ID",
+        "Title",
+        "Description",
+        "Related Item IDs",
+        "Source Requirement",
+        "Business Objective",
+        "Actors",
+        "Key Capabilities",
+        "Business Rules and Constraints",
+        "Business Value",
+        "Related Story IDs",
+        "Epic ID",
+        "Persona",
         "User Story",
-        "Assumption",
-        "Open Question",
-        "Requirement Coverage",
-        "Refinement Recommendation",
+        "Acceptance Criteria",
+        "Priority",
+        "Priority Rationale",
+        "Refinement Status",
+        "Dependencies",
+        "Requirement References",
+        "Assumptions",
+        "Open Questions",
+        "Requirement Text",
+        "Related Items",
+        "Testability or Clarification",
+        "Affected Items",
+        "Out-of-Scope Items",
+        "Requirement Type",
+        "Explicit Requirement",
+        "Mapped Backlog Items",
+        "Coverage Status",
+        "Coverage Reason",
+        "Recommendation",
+    ]
+    assert list(rows[0]) == expected_headers
+    assert all(len(row) == len(expected_headers) for row in rows)
+    assert Counter(row["Record Type"] for row in rows) == {
+        "Source Requirement": 1,
+        "Requirement Summary": 1,
+        "Epic": 1,
+        "User Story": 2,
+        "Non-Functional Requirement": 1,
+        "Assumption": 2,
+        "Open Question": 1,
+        "Out of Scope": 1,
+        "Requirement Coverage": 2,
+        "Refinement Recommendation": 1,
     }
+
+    def item(section: str, item_id: str) -> dict[str, str]:
+        return next(row for row in rows if row["Record Type"] == section and row["ID"] == item_id)
+
+    source_row = item("Source Requirement", "SOURCE")
+    assert source_row["Source Requirement"].startswith("'=")
+    assert "café, 東京, and 🚀" in source_row["Source Requirement"]
+
+    summary = item("Requirement Summary", "SUMMARY")
+    assert summary["Business Objective"] == (
+        'Help users export reports, including "quoted" report titles — with traceability.'
+    )
+    assert summary["Actors"] == "user; analyst, QA"
+    assert summary["Key Capabilities"] == "Export reports; Review coverage"
+    assert summary["Business Rules and Constraints"] == "Preserve Unicode: café, 東京, and 🚀"
+
+    epic = item("Epic", "E1")
+    assert epic["Title"] == "Report export"
+    assert epic["Description"] == "Export reports."
+    assert epic["Business Value"] == "Share reports."
+    assert epic["Related Story IDs"] == "S1; S2"
+
+    story = item("User Story", "S1")
+    assert story["Title"].startswith("'\x00\t=")
+    assert story["Epic ID"] == "E1"
+    assert story["Related Item IDs"] == "E1"
+    assert story["Persona"] == "user"
+    assert story["User Story"] == ("As a user, I want to export a report, so that I can share it.")
+    assert story["Priority"] == "Not suggested"
+    assert story["Priority Rationale"] == "The requirement does not specify priority."
+    assert story["Refinement Status"] == "Ready for Refinement Review"
+    assert story["Dependencies"] == ""
+    assert story["Requirement References"] == "R-001"
+    assert story["Assumptions"] == (
+        "Unconfirmed: support UTF-8 titles.\nUnconfirmed: preserve commas, quotes, and line breaks."
+    )
+    assert story["Open Questions"] == "Which report formats are required?"
+    criteria = story["Acceptance Criteria"]
+    assert criteria == (
+        "Given: a report is available\n"
+        "When: the user exports it\n"
+        "Then: a CSV file is downloaded\n\n"
+        "Given: the requirement contains commas, quotes, and\n"
+        "line breaks\n"
+        "When: the backlog is exported\n"
+        "Then: all criterion fields remain intact"
+    )
+    assert len([row for row in rows if row["Record Type"] == "Acceptance Criterion"]) == 0
+
+    second_story = item("User Story", "S2")
+    assert second_story["Dependencies"] == "S1"
+    assert second_story["Requirement References"] == "R-001; R-002"
+    assert second_story["Acceptance Criteria"].startswith("Given: a backlog has been generated")
+
+    nfr = item("Non-Functional Requirement", "NFR-001")
+    assert nfr["Requirement Text"] == "The export should be fast."
+    assert nfr["Related Items"] == nfr["Related Item IDs"] == "S1"
+    assert nfr["Testability or Clarification"] == "No measurable threshold is specified."
+    assert item("Assumption", "ASSUMPTION-001")["Assumptions"] == (
+        "Unconfirmed: user means an authorized report user."
+    )
+    assert item("Assumption", "ASSUMPTION-002")["Assumptions"] == "' \t+SUM(1,2)"
+    question = item("Open Question", "QUESTION-001")
+    assert question["Open Questions"] == "Which report formats are required?"
+    assert question["Affected Items"] == question["Related Item IDs"] == "S1"
+    assert item("Out of Scope", "OUT-001")["Out-of-Scope Items"] == (
+        "Exporting to PDF is excluded."
+    )
+    coverage = item("Requirement Coverage", "R-001")
+    assert coverage["Requirement Type"] == "Functional"
+    assert coverage["Explicit Requirement"] == "export a report"
+    assert coverage["Mapped Backlog Items"] == coverage["Related Item IDs"] == "S1"
+    assert coverage["Coverage Status"] == "Covered"
+    assert coverage["Coverage Reason"] == "S1 covers report export."
+    recommendation = item("Refinement Recommendation", "RECOMMENDATION-001")
+    assert recommendation["Recommendation"] == "Confirm the supported report formats."
+    assert recommendation["Related Item IDs"] == "S1"
+
+
+def test_export_handles_empty_optional_values_without_inventing_rows() -> None:
+    backlog = example_backlog()
+    backlog.requirement_summary.actors = []
+    backlog.requirement_summary.key_capabilities = []
+    backlog.requirement_summary.constraints_and_business_rules = []
+    backlog.user_stories[0].epic_id = None
+    backlog.user_stories[0].dependencies = []
+    backlog.user_stories[0].assumptions = []
+    backlog.user_stories[0].open_questions = []
+    backlog.non_functional_requirements = []
+    backlog.requirement_coverage[1].mapped_items = []
+    backlog.assumptions = []
+    backlog.open_questions = []
+    backlog.out_of_scope = []
+    backlog.refinement_recommendations = []
+
+    response = client.post(
+        "/api/v1/stories/export",
+        json={
+            "source_requirement": "A sufficiently long requirement with optional data omitted.",
+            "backlog": backlog.model_dump(),
+        },
+    )
+
+    assert response.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows[0]["Actors"] == ""
+    assert rows[0]["Key Capabilities"] == ""
+    assert rows[0]["Business Rules and Constraints"] == ""
+    story = next(row for row in rows if row["Record Type"] == "User Story")
+    assert story["Epic ID"] == ""
+    assert story["Related Item IDs"] == ""
+    assert story["Dependencies"] == ""
+    assert story["Assumptions"] == ""
+    assert story["Open Questions"] == ""
+    coverage = next(
+        row for row in rows if row["Record Type"] == "Requirement Coverage" and row["ID"] == "R-002"
+    )
+    assert coverage["Mapped Backlog Items"] == ""
+    assert Counter(row["Record Type"] for row in rows) == {
+        "Source Requirement": 1,
+        "Requirement Summary": 1,
+        "Epic": 1,
+        "User Story": 1,
+        "Requirement Coverage": 2,
+    }
+
+
+def test_normalized_csv_remains_available_as_an_optional_export() -> None:
+    response = client.post(
+        "/api/v1/stories/export?format=normalized",
+        json={
+            "source_requirement": "A sufficiently long requirement for export.",
+            "backlog": example_backlog().model_dump(),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="agile-backlog-normalized.csv"'
+    )
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert list(rows[0]) == ["Section", "Item ID", "Related Item IDs", "Field", "Value"]
+    story_title = next(
+        row
+        for row in rows
+        if row["Section"] == "User Story" and row["Item ID"] == "S1" and row["Field"] == "Title"
+    )
+    assert story_title["Value"].startswith("'=")
+    criteria = next(
+        row
+        for row in rows
+        if row["Section"] == "User Story"
+        and row["Item ID"] == "S1"
+        and row["Field"] == "Acceptance Criteria"
+    )
+    assert "Given: a report is available" in criteria["Value"]
 
 
 def test_backlog_rejects_dangling_requirement_reference() -> None:

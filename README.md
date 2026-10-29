@@ -105,14 +105,16 @@ temporary provider failures return HTTP 503 after the configured bounded retries
 
 The generation prompt treats the submitted requirement as the sole source of truth. It instructs the model to avoid inventing product behavior, label unresolved details as assumptions, and distinguish explicit exclusions from unspecified scope. Coverage entries receive internal `R-001`-style identifiers; stories refer to those IDs instead of treating generated IDs as source quotations. The API uses Gemini structured output and validates the complete backlog and its cross-references before returning it. Requirements are not persisted.
 
-The CSV endpoint exports the full backlog, with a row for each relevant artifact (summary, epic, story, non-functional requirement, assumption, question, exclusion, coverage entry, and recommendation). Gherkin acceptance criteria are included in each story row. Spreadsheet formula prefixes are neutralized before export.
+The CSV endpoint defaults to an Excel-friendly flat backlog: one row per source requirement, summary, epic, story, non-functional requirement, assumption, open question, out-of-scope item, requirement-coverage entry, and refinement recommendation. Dedicated columns preserve the validated schema fields, including traceability and relationships; acceptance criteria are grouped in each story row with readable Given/When/Then labels and line breaks. Multiple IDs and list values are separated consistently with semicolons, while summary-level values appear only on the summary row. Empty optional values remain blank rather than being replaced with invented content. The UTF-8 CSV includes a BOM for Excel compatibility, uses standard CSV quoting, and neutralizes spreadsheet formula prefixes even when preceded by whitespace or control characters.
+
+The default download is `agile-backlog.csv`. Existing consumers that need the former five-column `Section`, `Item ID`, `Related Item IDs`, `Field`, and `Value` layout can request `POST /api/v1/stories/export?format=normalized`; that response is named `agile-backlog-normalized.csv`.
 
 ## API
 
 - `GET /health` — liveness check; does not call Gemini.
 - `POST /api/v1/stories/generate` — accepts `{"requirement": "..."}` and returns a validated Agile backlog.
 - `POST /api/v1/stories/generate-file` — accepts one `.txt`, `.pdf`, or `.docx` file as multipart form data, extracts its text, and returns a validated Agile backlog.
-- `POST /api/v1/stories/export` — accepts the generation response and returns the full backlog as a CSV attachment.
+- `POST /api/v1/stories/export` — accepts the generation response and returns the flat backlog CSV by default; `?format=normalized` selects the optional five-column format.
 
 Document uploads are size-limited to 10 MiB by default (`MAX_UPLOAD_BYTES`), parsed on the server, and not persisted. Extracted text is limited by `MAX_REQUIREMENT_CHARS`; scanned/image-only PDFs require OCR before upload. `.txt` files must use UTF-8 encoding, and password-protected PDFs are not supported.
 

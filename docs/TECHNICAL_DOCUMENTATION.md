@@ -279,7 +279,7 @@ response.
 | `POST /api/v1/stories/generate` / `create_story()` | `GenerateStoryRequest`; `GeneratedBacklogResponse` | Forwards the validated requirement string into `_generate_backlog_response()`. |
 | `POST /api/v1/stories/generate-file` / `create_story_from_file()` | Multipart `UploadFile`; `GeneratedBacklogResponse` | Reads at most configured bytes plus one sentinel byte, closes the upload, extracts text, then uses the shared generation path. |
 | `_generate_backlog_response()` | Requirement string; validated response | Calls `generate_story()` and maps configuration, quota, provider, parsing, and unexpected errors to HTTP status codes. |
-| `POST /api/v1/stories/export` / `export_story()` | `ExportStoryRequest`; CSV attachment | Validates the supplied response, creates one row per backlog artifact, and returns CSV bytes. |
+| `POST /api/v1/stories/export` / `export_story()` | `ExportStoryRequest`; CSV attachment | Validates the supplied response, creates one flat row per logical backlog item, and returns CSV bytes. `?format=normalized` selects the legacy field/value layout. |
 
 Error mapping in `_generate_backlog_response()` is explicit:
 
@@ -293,11 +293,24 @@ Error mapping in `_generate_backlog_response()` is explicit:
 | Other unexpected exception | 502 | Generic client detail; exception type is logged. |
 
 CSV generation uses Python's `csv.writer`, `StringIO`, and `StreamingResponse`. Although
-the response is streamed to the HTTP caller, the CSV is first built in memory. `_format_items`
-and `_format_criteria` convert lists and Given/When/Then fields into cell text. Every cell
-passes through `_spreadsheet_safe()`, which prefixes an apostrophe when the first
-non-whitespace character is `=`, `+`, `-`, or `@`, mitigating spreadsheet formula
-interpretation. The response has filename `agile-backlog.csv`.
+the response is streamed to the HTTP caller, the CSV is first built in memory. The default
+flat export uses `FLAT_CSV_HEADERS`, with dedicated columns for common item data, source
+and summary fields, epic/story/NFR details, relationships, and coverage/recommendations.
+It emits one row per source requirement, summary, epic, user story, NFR, assumption, open
+question, out-of-scope entry, coverage entry, and recommendation. Acceptance criteria
+remain in their story row as readable multiline `Given:`, `When:`, and `Then:` blocks;
+criteria do not create extra rows. Arrays use semicolon-separated values except story
+assumptions and questions, which use line breaks for readability. Empty optional values
+remain blank, and summary/source values are not repeated across item rows.
+
+`format=normalized` retains the previous five-column `Section`, `Item ID`, `Related Item
+IDs`, `Field`, and `Value` layout for callers that require it. Both formats are written
+with standard CSV escaping, CRLF record endings, UTF-8 with a BOM, and formula-prefix
+neutralization. `_spreadsheet_safe()` examines the first visible character after
+whitespace, control characters, and BOMs, then prefixes an apostrophe for `=`, `+`, `-`,
+or `@`. The default response filename is `agile-backlog.csv`; the normalized response is
+`agile-backlog-normalized.csv`. Responses include `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`. CSV export does not call Gemini.
 
 ### 5.2 `app.config` — settings and environment
 
@@ -496,11 +509,16 @@ three provider attempts; if correction is needed, it can issue up to three more.
 
 ### 6.4 CSV export
 
-The export endpoint accepts the full generation response shape, re-validates its nested
-backlog, and writes a CSV header plus one row for each of the summary, epic, story, NFR,
-assumption, open question, exclusion, coverage entry, and refinement recommendation. The
-source requirement is repeated in rows to preserve context. Formula-like values are
-neutralized before writing. CSV export does not call Gemini.
+The export endpoint accepts the full generation response shape and re-validates its nested
+backlog. The default flat layout writes one row per logical item and maps the validated
+schema fields to dedicated columns, preserving links among epics, stories, NFRs,
+requirements, coverage, and recommendations. Acceptance criteria are kept together in the
+story row as labeled multiline text; empty optional values stay blank. A UTF-8 BOM supports
+Excel, and `csv.writer` handles commas, quotes, Unicode, and embedded newlines. Spreadsheet
+formula-like values are neutralized, including when control characters or whitespace
+precede the formula prefix. Callers can request `?format=normalized` for the prior
+five-column field/value format. Export operates only on the supplied validated backlog and
+does not call Gemini.
 
 ## 7. Data contracts and persistence
 
@@ -511,7 +529,7 @@ neutralized before writing. CSV export does not call Gemini.
 | `GET /health` | None | `{"status":"ok"}` | No provider health check is performed. |
 | `POST /api/v1/stories/generate` | JSON `{"requirement": "..."}` | `{"source_requirement": "...", "backlog": {...}}` | 422 for invalid request/JSON; 429 quota/rate limit; 502 invalid model/provider response; 503 missing key or transient provider outage. |
 | `POST /api/v1/stories/generate-file` | Multipart field `file` | Same generation response shape | 400 unsupported/unreadable content; 413 upload exceeds byte limit; 422 extracted text too long or invalid request. |
-| `POST /api/v1/stories/export` | Full response object (`source_requirement` and `backlog`) | `text/csv; charset=utf-8` attachment | 422 invalid payload/backlog references. |
+| `POST /api/v1/stories/export` | Full response object (`source_requirement` and `backlog`); optional `format=flat|normalized` query | `text/csv; charset=utf-8` attachment; flat by default | 422 invalid payload/backlog references. |
 
 File parsing errors are raised before provider generation. A multiline text JSON body must
 escape embedded line breaks as `\\n`; malformed JSON is handled by the custom 422
