@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
@@ -8,6 +9,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
@@ -446,3 +448,8 @@ async def export_story(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+frontend_static_dir = Path(__file__).resolve().parent / "static"
+if frontend_static_dir.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_static_dir, html=True), name="frontend")

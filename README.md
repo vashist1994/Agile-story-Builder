@@ -69,6 +69,37 @@ Generation can return an error if Gemini is unavailable, the key is invalid, or 
 response does not satisfy the backlog schema. File uploads are limited by `MAX_UPLOAD_BYTES`;
 plain text and extracted document text are limited by `MAX_REQUIREMENT_CHARS`.
 
+## Deploy to Render with Docker
+
+The root [`Dockerfile`](./Dockerfile) builds the Vite frontend and packages its production
+files into the FastAPI image. FastAPI serves both the API and the frontend from the same
+Render service, so browser API calls use the same origin. The root
+[`render.yaml`](./render.yaml) defines this as a single Docker-backed Render Blueprint
+service and uses `/health` for its health check.
+
+1. Push the repository to GitHub and create a Blueprint in Render using the repository's
+   root `render.yaml`.
+2. During Blueprint setup, provide `GOOGLE_API_KEY` as the service's secret environment
+   variable. It is not stored in the repository or baked into the Docker image.
+3. Wait for the image build and initial deploy to finish. Open the service's Render URL
+   for the application; append `/docs` for FastAPI Swagger.
+4. GitHub Actions runs the backend lint/tests and frontend production build for pull
+   requests and pushes to `main`. Render's `checksPass` auto-deploy setting deploys the
+   Blueprint service after the configured GitHub checks pass. You can also deploy or
+   redeploy from the Render Dashboard.
+
+The container listens on Render's `PORT` environment variable and runs as an unprivileged
+user. To build and run the same image locally:
+
+```sh
+docker build -t storyforge .
+docker run --rm -p 8000:8000 -e GOOGLE_API_KEY=your-key storyforge
+```
+
+Then open `http://localhost:8000` for the application or
+`http://localhost:8000/docs` for Swagger. Do not commit API keys or pass them as Docker
+build arguments.
+
 ## Configuration
 
 | Variable | Default | Description |
