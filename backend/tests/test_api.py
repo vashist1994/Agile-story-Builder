@@ -1,13 +1,18 @@
+import asyncio
 import csv
 import io
+from types import SimpleNamespace
 
 import pytest
 from docx import Document
 from fastapi.testclient import TestClient
+from langchain_core.runnables import RunnableLambda
+from pydantic import ValidationError
 
 from app.documents import DocumentExtractionError, extract_requirement_text
 from app.main import app
 from app.schemas import AgileBacklog, NonFunctionalRequirement
+from app.service import BacklogValidationError, generate_story
 
 client = TestClient(app)
 
@@ -176,6 +181,77 @@ def test_generation_returns_validated_backlog(monkeypatch) -> None:
     assert response.json()["backlog"]["user_stories"][0]["story_id"] == "S1"
     assert response.json()["backlog"]["requirement_summary"]["business_objective"]
     assert response.json()["source_requirement"] == "Users can export reports as CSV files."
+
+
+def test_generation_retries_invalid_references_once(monkeypatch) -> None:
+    invalid_data = example_backlog().model_dump()
+    invalid_data["user_stories"][0]["requirement_references"] = ["R-009"]
+    with pytest.raises(ValidationError) as validation_error:
+        AgileBacklog.model_validate(invalid_data)
+
+    responses = [
+        {"raw": None, "parsed": None, "parsing_error": validation_error.value},
+        {"raw": None, "parsed": example_backlog(), "parsing_error": None},
+    ]
+
+    class FakeModel:
+        def with_structured_output(self, _schema, **kwargs):
+            assert kwargs == {"method": "json_schema", "include_raw": True}
+            return RunnableLambda(lambda _input: responses.pop(0))
+
+    monkeypatch.setattr(
+        "app.service.get_settings",
+        lambda: SimpleNamespace(google_api_key="test-key", gemini_model="test-model"),
+    )
+    monkeypatch.setattr("app.service.ChatGoogleGenerativeAI", lambda **_kwargs: FakeModel())
+
+    result = asyncio.run(generate_story("A valid product requirement for backlog generation."))
+
+    assert result == example_backlog()
+    assert responses == []
+
+
+def test_generation_raises_clear_error_after_invalid_retry(monkeypatch) -> None:
+    invalid_data = example_backlog().model_dump()
+    invalid_data["user_stories"][0]["requirement_references"] = ["R-009"]
+    with pytest.raises(ValidationError) as validation_error:
+        AgileBacklog.model_validate(invalid_data)
+
+    responses = [
+        {"raw": None, "parsed": None, "parsing_error": validation_error.value},
+        {"raw": None, "parsed": None, "parsing_error": validation_error.value},
+    ]
+
+    class FakeModel:
+        def with_structured_output(self, _schema, **_kwargs):
+            return RunnableLambda(lambda _input: responses.pop(0))
+
+    monkeypatch.setattr(
+        "app.service.get_settings",
+        lambda: SimpleNamespace(google_api_key="test-key", gemini_model="test-model"),
+    )
+    monkeypatch.setattr("app.service.ChatGoogleGenerativeAI", lambda **_kwargs: FakeModel())
+
+    with pytest.raises(BacklogValidationError, match="after one automatic correction attempt"):
+        asyncio.run(generate_story("A valid product requirement for backlog generation."))
+    assert responses == []
+
+
+def test_generation_returns_actionable_error_if_corrective_retry_fails(monkeypatch) -> None:
+    async def fail_validation(_requirement: str) -> AgileBacklog:
+        raise BacklogValidationError(
+            "Gemini returned an inconsistent backlog after one automatic correction attempt. "
+            "Please retry the request."
+        )
+
+    monkeypatch.setattr("app.main.generate_story", fail_validation)
+    response = client.post(
+        "/api/v1/stories/generate",
+        json={"requirement": "A valid product requirement for backlog generation."},
+    )
+
+    assert response.status_code == 502
+    assert "after one automatic correction attempt" in response.json()["detail"]
 
 
 def test_multiline_swagger_requirement_accepts_escaped_json_newlines(monkeypatch) -> None:

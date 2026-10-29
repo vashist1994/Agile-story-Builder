@@ -17,7 +17,7 @@ from app.documents import (
     extract_requirement_text,
 )
 from app.schemas import AgileBacklog, GeneratedBacklogResponse, GenerateStoryRequest
-from app.service import GeminiConfigurationError, generate_story
+from app.service import BacklogValidationError, GeminiConfigurationError, generate_story
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -170,6 +170,8 @@ async def _generate_backlog_response(requirement: str) -> GeneratedBacklogRespon
         backlog = await generate_story(requirement)
     except GeminiConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except BacklogValidationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Story generation failed")
         raise HTTPException(
